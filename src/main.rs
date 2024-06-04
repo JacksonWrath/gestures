@@ -1,5 +1,6 @@
 mod config;
 mod event_handler;
+mod exec_handler;
 mod gestures;
 mod ipc;
 mod ipc_client;

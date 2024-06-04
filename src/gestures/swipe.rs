@@ -12,6 +12,10 @@ pub struct Swipe {
     pub start: Option<String>,
     #[knuffel(property)]
     pub end: Option<String>,
+    #[knuffel(property)]
+    pub allow_continue_delay: Option<i64>,
+    #[knuffel(property)]
+    pub include_cancelled: Option<bool>,
 }
 
 /// Direction of swipe gestures

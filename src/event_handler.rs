@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use chrono::Duration;
 use input::{
     event::{
         gesture::{
@@ -27,12 +28,15 @@ use nix::{
 
 use crate::config::Config;
 use crate::gestures::{hold::*, pinch::*, swipe::*, *};
-use crate::utils::exec_command_from_string;
+use crate::utils::{exec_command, ExecArgs};
+use crate::exec_handler::ExecHandler;
 
 #[derive(Debug)]
 pub struct EventHandler {
     config: Arc<RwLock<Config>>,
     event: Gesture,
+    exec_handler: ExecHandler,
+    swipe_gesture_delayed: bool,
 }
 
 impl EventHandler {
@@ -40,6 +44,8 @@ impl EventHandler {
         Self {
             config,
             event: Gesture::None,
+            exec_handler: ExecHandler::new(),
+            swipe_gesture_delayed: false,
         }
     }
 
@@ -92,12 +98,15 @@ impl EventHandler {
         input.dispatch().unwrap();
         for event in input.clone() {
             if let Event::Gesture(e) = event {
+                log::debug!("{:?}", &e);
                 match e {
                     GestureEvent::Pinch(e) => self.handle_pinch_event(e)?,
                     GestureEvent::Swipe(e) => self.handle_swipe_event(e)?,
                     GestureEvent::Hold(e) => self.handle_hold_event(e)?,
                     _ => (),
                 }
+            } else if self.swipe_gesture_delayed {
+                self.end_swipe_gesture();
             }
             input.dispatch().unwrap();
         }
@@ -118,13 +127,8 @@ impl EventHandler {
                     for i in &self.config.clone().read().unwrap().gestures {
                         if let Gesture::Hold(j) = i {
                             if j.fingers == s.fingers {
-                                exec_command_from_string(
-                                    &j.action.clone().unwrap_or_default(),
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                )?;
+                                let exec_args = ExecArgs::new_args_only((&j.action).clone().unwrap_or_default());
+                                exec_command(&exec_args)?;
                             }
                         }
                     }
@@ -151,13 +155,9 @@ impl EventHandler {
                             if (j.direction == s.direction || j.direction == PinchDir::Any)
                                 && j.fingers == s.fingers
                             {
-                                exec_command_from_string(
-                                    &j.start.clone().unwrap_or_default(),
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                )?;
+                                exec_command(&ExecArgs::new_args_only(
+                                    (&j.start).clone().unwrap_or_default()
+                                ))?;
                             }
                         }
                     }
@@ -180,13 +180,13 @@ impl EventHandler {
                             if (j.direction == dir || j.direction == PinchDir::Any)
                                 && j.fingers == s.fingers
                             {
-                                exec_command_from_string(
-                                    &j.update.clone().unwrap_or_default(),
-                                    0.0,
-                                    0.0,
-                                    delta_angle,
-                                    scale,
-                                )?;
+                                exec_command(&ExecArgs {
+                                    args: (&j.update).clone().unwrap_or_default(),
+                                    dx: 0.0,
+                                    dy: 0.0,
+                                    da: delta_angle,
+                                    scale
+                                })?;
                             }
                         }
                     }
@@ -206,13 +206,9 @@ impl EventHandler {
                             if (j.direction == s.direction || j.direction == PinchDir::Any)
                                 && j.fingers == s.fingers
                             {
-                                exec_command_from_string(
-                                    &j.end.clone().unwrap_or_default(),
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                )?;
+                                exec_command(&ExecArgs::new_args_only(
+                                    (&j.end).clone().unwrap_or_default(),
+                                ))?;
                             }
                         }
                     }
@@ -232,6 +228,8 @@ impl EventHandler {
                     update: None,
                     start: None,
                     end: None,
+                    allow_continue_delay: None,
+                    include_cancelled: None,
                 });
                 if let Gesture::Swipe(s) = &self.event {
                     for i in &self.config.clone().read().unwrap().gestures {
@@ -239,21 +237,19 @@ impl EventHandler {
                             if j.fingers == s.fingers
                                 && (j.direction == s.direction || j.direction == SwipeDir::Any)
                             {
-                                exec_command_from_string(
-                                    &j.start.clone().unwrap_or_default(),
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                )?;
+                                if ! self.exec_handler.cancel_delay() {
+                                    exec_command(&ExecArgs::new_args_only(
+                                        (&j.start).clone().unwrap_or_default(),
+                                    ))?;
+                                }
                             }
                         }
                     }
                 }
             }
             GestureSwipeEvent::Update(e) => {
-                let (x, y) = (e.dx(), e.dy());
-                let swipe_dir = SwipeDir::dir(x, y);
+                let (dx, dy) = (e.dx(), e.dy());
+                let swipe_dir = SwipeDir::dir(dx, dy);
 
                 if let Gesture::Swipe(s) = &self.event {
                     log::debug!("Swipe: direction={:?} fingers={:?}", &swipe_dir, &s.fingers);
@@ -262,13 +258,13 @@ impl EventHandler {
                             if j.fingers == s.fingers
                                 && (j.direction == swipe_dir || j.direction == SwipeDir::Any)
                             {
-                                exec_command_from_string(
-                                    &j.update.clone().unwrap_or_default(),
-                                    x,
-                                    y,
-                                    0.0,
-                                    0.0,
-                                )?;
+                                exec_command(&ExecArgs {
+                                    args: (&j.update).clone().unwrap_or_default(),
+                                    dx,
+                                    dy,
+                                    da: 0.0,
+                                    scale: 0.0,
+                                })?;
                             }
                         }
                     }
@@ -278,24 +274,26 @@ impl EventHandler {
                         update: None,
                         start: None,
                         end: None,
+                        allow_continue_delay: None,
+                        include_cancelled: None,
                     })
                 }
             }
             GestureSwipeEvent::End(e) => {
                 if let Gesture::Swipe(s) = &self.event {
-                    if !e.cancelled() {
-                        for i in &self.config.clone().read().unwrap().gestures {
-                            if let Gesture::Swipe(j) = i {
-                                if j.fingers == s.fingers
-                                    && (j.direction == s.direction || j.direction == SwipeDir::Any)
-                                {
-                                    exec_command_from_string(
-                                        &j.end.clone().unwrap_or_default(),
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                    )?;
+                    for i in &self.config.clone().read().unwrap().gestures {
+                        if let Gesture::Swipe(j) = i {
+                            if j.fingers == s.fingers
+                                && (j.direction == s.direction || j.direction == SwipeDir::Any)
+                            {
+                                if !e.cancelled() || j.include_cancelled.unwrap_or_default() {
+                                    let args = (&j.end).clone().unwrap_or_default();
+                                    let delay = (&j.allow_continue_delay).clone().unwrap_or_default();
+                                    self.exec_handler.schedule_command(
+                                        Duration::milliseconds(delay),
+                                        ExecArgs::new_args_only(args),
+                                    );
+                                    self.swipe_gesture_delayed = delay != 0;
                                 }
                             }
                         }
@@ -305,6 +303,11 @@ impl EventHandler {
             _ => (),
         }
         Ok(())
+    }
+
+    fn end_swipe_gesture(&mut self) {
+        self.exec_handler.exec_delayed_command();
+        self.swipe_gesture_delayed = false;
     }
 }
 
